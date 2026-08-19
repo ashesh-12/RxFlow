@@ -11,11 +11,13 @@ from rxflow.connectors import (
     CircuitBreaker,
     FileSink,
     FileSource,
+    FullQueue,
     MemorySink,
     PartitionedLog,
     ProtectedSink,
     QueueSource,
     StdoutSink,
+    WebhookSource,
 )
 from rxflow.context import Runtime, Subscription
 from rxflow.envelope import Envelope, as_envelope
@@ -60,6 +62,7 @@ __all__ = [
     "Envelope",
     "FileSink",
     "FileSource",
+    "FullQueue",
     "KeyValueStore",
     "MemorySink",
     "Metrics",
@@ -74,6 +77,7 @@ __all__ = [
     "Subscription",
     "VirtualClock",
     "WallClock",
+    "WebhookSource",
     "Window",
     "as_envelope",
     "as_table",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Hashable, Iterator, Mapping
@@ -48,15 +49,32 @@ class PartitionedLog:
     def close(self) -> None:
         self.closed = True
 
-    def consumer(self, start_offsets: dict[int, int] | None = None) -> "LogConsumer":
-        return LogConsumer(self, start_offsets)
+    def consumer(
+        self,
+        start_offsets: dict[int, int] | None = None,
+        *,
+        live: bool = False,
+        poll_interval: float = 0.02,
+    ) -> "LogConsumer":
+        return LogConsumer(
+            self, start_offsets, live=live, poll_interval=poll_interval
+        )
 
 
 class LogConsumer:
-    """Pulls from a PartitionedLog. commit/seek enable at-least-once replay."""
+    """Pulls from a PartitionedLog. commit/seek enable at-least-once replay.
+
+    ``live=True`` waits for new appends until the consumer or the log is closed
+    (drain). Unread records still in the log are not pulled after close.
+    """
 
     def __init__(
-        self, log: PartitionedLog, start_offsets: dict[int, int] | None = None
+        self,
+        log: PartitionedLog,
+        start_offsets: dict[int, int] | None = None,
+        *,
+        live: bool = False,
+        poll_interval: float = 0.02,
     ) -> None:
         self._log = log
         self._pos: dict[int, int] = {
@@ -64,6 +82,8 @@ class LogConsumer:
         }
         self._committed: dict[int, int] = dict(self._pos)
         self._closed = False
+        self.live = live
+        self.poll_interval = poll_interval
 
     def __iter__(self) -> Iterator[Envelope]:
         while not self._closed:
@@ -77,8 +97,12 @@ class LogConsumer:
                     self._pos[p] = pos
                     progressed = True
                     yield env
-            if not progressed:
-                return
+            if progressed:
+                continue
+            if self.live and not self._log.closed:
+                time.sleep(self.poll_interval)
+                continue
+            return
 
     def seek(self, partition: int | str, offset: int) -> None:
         self._pos[int(partition)] = offset

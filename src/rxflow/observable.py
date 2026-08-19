@@ -30,6 +30,22 @@ class Observable:
 
     @classmethod
     def from_iterable(cls, iterable: Iterable[Any]) -> Observable:
+        """Snapshot a sized collection so a later subscribe can replay it.
+
+        Generators and other unsized iterators are refused: ``list()`` would
+        hang if the source never ends. Use ``from_source`` for live streams,
+        or ``Observable(lambda: gen)`` for a one-shot cold generator.
+        """
+        try:
+            len(iterable)  # type: ignore[arg-type]
+        except TypeError:
+            raise TypeError(
+                "Observable.from_iterable() only accepts sized collections "
+                "(list, tuple, range, …) so it can snapshot for replay. "
+                "A generator or live iterator would be drained at construction "
+                "and hang if unbounded. Use Observable.from_source(...) instead, "
+                "or Observable(lambda: gen) for a one-shot cold generator."
+            ) from None
         snapshot = list(iterable)
         return cls(lambda: (as_envelope(x) for x in snapshot))
 
@@ -106,6 +122,7 @@ class Observable:
         checkpoint_dir: str | None = None,
         checkpoint_every: int = 100,
         protect_sinks: bool = True,
+        subscription: Subscription | None = None,
         on_error: Callable[[BaseException], Any] | None = None,
         on_complete: Callable[[], Any] | None = None,
     ) -> Subscription:
@@ -114,7 +131,7 @@ class Observable:
             ProtectedSink(s) if protect_sinks and not isinstance(s, ProtectedSink) else s
             for s in sinks
         ]
-        sub = Subscription()
+        sub = subscription or Subscription()
         metrics = Metrics()
         store = state or KeyValueStore()
         source = self._source

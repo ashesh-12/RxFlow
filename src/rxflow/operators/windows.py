@@ -45,41 +45,48 @@ def assign_watermarks(bounded_out_of_orderness: str | timedelta | float = "0s"):
                 max_ts = et
                 if rt is not None:
                     rt.watermark = max_ts - bound
+                    rt.metrics.record_watermark(rt.watermark, rt.clock.now())
             yield env
 
     return assign_watermarks()
 
 
-def tumbling_window(size, *, allowed_lateness="0s"):
+def tumbling_window(size, *, allowed_lateness="0s", state_id: str = "tumbling_window"):
     size_td = parse_duration(size)
     lateness = parse_duration(allowed_lateness)
 
     @operator
     def tumbling_window(stream):
-        yield from _run_windows(stream, size_td, size_td, lateness, kind="tumbling")
+        yield from _run_windows(
+            stream, size_td, size_td, lateness, kind="tumbling", state_id=state_id
+        )
 
     return tumbling_window()
 
 
-def sliding_window(size, slide, *, allowed_lateness="0s"):
+def sliding_window(
+    size, slide, *, allowed_lateness="0s", state_id: str = "sliding_window"
+):
     size_td = parse_duration(size)
     slide_td = parse_duration(slide)
     lateness = parse_duration(allowed_lateness)
 
     @operator
     def sliding_window(stream):
-        yield from _run_windows(stream, size_td, slide_td, lateness, kind="sliding")
+        yield from _run_windows(
+            stream, size_td, slide_td, lateness, kind="sliding", state_id=state_id
+        )
 
     return sliding_window()
 
 
-def session_window(gap, *, allowed_lateness="0s"):
+def session_window(gap, *, allowed_lateness="0s", state_id: str = "session_window"):
     gap_td = parse_duration(gap)
     lateness = parse_duration(allowed_lateness)
 
     @operator
     def session_window(stream):
-        yield from _run_sessions(stream, gap_td, lateness)
+        yield from _run_sessions(stream, gap_td, lateness, state_id=state_id)
 
     return session_window()
 
@@ -126,25 +133,32 @@ def _run_windows(
     slide: timedelta,
     lateness: timedelta,
     kind: str,
+    state_id: str,
 ) -> Iterator[Envelope]:
-    # key -> start -> items
-    buckets: dict[Hashable, dict[datetime, list[Envelope]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
     rt = get_runtime()
+    buckets: dict[Hashable, dict[datetime, list[Envelope]]] = _load_window_buckets(
+        rt, state_id
+    )
+
+    def persist() -> None:
+        _save_window_buckets(rt, state_id, buckets)
 
     def close_ready(watermark: datetime | None) -> Iterator[Envelope]:
         if watermark is None:
             return
-            yield  # pragma: no cover — makes this a generator
+            yield
+        changed = False
         for key, keyed in list(buckets.items()):
             for start, items in list(keyed.items()):
                 end = start + size
                 if watermark >= end + lateness and items:
                     yield _to_env(key, start, end, items)
                     del keyed[start]
+                    changed = True
             if not keyed:
                 del buckets[key]
+        if changed:
+            persist()
 
     for item in stream:
         env = as_envelope(item)
@@ -158,33 +172,45 @@ def _run_windows(
             continue
         for start in _window_starts(et, size, slide, kind):
             buckets[env.key][start].append(env)
+        persist()
         yield from close_ready(wm)
 
-    # end of stream: flush remaining
+    if rt is not None and rt.stop_now:
+        persist()
+        return
     for key, keyed in list(buckets.items()):
         for start, items in list(keyed.items()):
             if items:
                 yield _to_env(key, start, start + size, items)
         keyed.clear()
     buckets.clear()
+    persist()
 
 
 def _run_sessions(
-    stream: Iterable, gap: timedelta, lateness: timedelta
+    stream: Iterable, gap: timedelta, lateness: timedelta, state_id: str
 ) -> Iterator[Envelope]:
-    # key -> (start, last_time, items)
-    open_s: dict[Hashable, tuple[datetime, datetime, list[Envelope]]] = {}
     rt = get_runtime()
+    open_s: dict[Hashable, tuple[datetime, datetime, list[Envelope]]] = (
+        _load_sessions(rt, state_id)
+    )
+
+    def persist() -> None:
+        _save_sessions(rt, state_id, open_s)
 
     def close_if_ready(watermark: datetime | None) -> Iterator[Envelope]:
         if watermark is None:
             return
             yield
+        changed = False
         for key, (start, last, items) in list(open_s.items()):
             end = last + gap
             if watermark >= end + lateness and items:
                 yield _to_env(key, start, end, items)
                 del open_s[key]
+                changed = True
+        if changed:
+            persist()
 
     for item in stream:
         env = as_envelope(item)
@@ -209,12 +235,58 @@ def _run_sessions(
                 new_start = start if et >= start else et
                 new_last = last if et <= last else et
                 open_s[env.key] = (new_start, new_last, items)
+        persist()
         yield from close_if_ready(wm)
 
+    if rt is not None and rt.stop_now:
+        persist()
+        return
     for key, (start, last, items) in list(open_s.items()):
         if items:
             yield _to_env(key, start, last + gap, items)
     open_s.clear()
+    persist()
+
+
+def _load_window_buckets(rt, state_id: str):
+    buckets: dict[Hashable, dict[datetime, list[Envelope]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    if rt is None:
+        return buckets
+    for key, keyed in rt.state.items(state_id):
+        for start, items in keyed.items():
+            buckets[key][start] = list(items)
+    return buckets
+
+
+def _save_window_buckets(rt, state_id: str, buckets) -> None:
+    if rt is None:
+        return
+    existing = list(rt.state.namespace(state_id))
+    for key in existing:
+        if key not in buckets or not buckets[key]:
+            rt.state.pop(state_id, key)
+    for key, keyed in buckets.items():
+        if keyed:
+            rt.state.put(state_id, key, {start: list(items) for start, items in keyed.items()})
+
+
+def _load_sessions(rt, state_id: str):
+    if rt is None:
+        return {}
+    return {key: tuple(val) for key, val in rt.state.items(state_id)}
+
+
+def _save_sessions(rt, state_id: str, open_s) -> None:
+    if rt is None:
+        return
+    existing = list(rt.state.namespace(state_id))
+    for key in existing:
+        if key not in open_s:
+            rt.state.pop(state_id, key)
+    for key, val in open_s.items():
+        rt.state.put(state_id, key, val)
 
 
 def current_now(rt: Any) -> datetime:

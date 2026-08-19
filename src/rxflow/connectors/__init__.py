@@ -2,6 +2,7 @@ from rxflow.connectors.base import Sink, Source
 from rxflow.connectors.file import FileSource
 from rxflow.connectors.log import LogConsumer, PartitionedLog
 from rxflow.connectors.memory import FullQueue, QueueSource
+from rxflow.connectors.webhook import WebhookSource
 from rxflow.connectors.sinks import (
     CallbackSink,
     CircuitBreaker,
@@ -25,4 +26,5 @@ __all__ = [
     "Sink",
     "Source",
     "StdoutSink",
+    "WebhookSource",
 ]

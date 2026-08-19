@@ -149,6 +149,54 @@ def test_map_skip_policy_drops_poison_and_continues():
     assert [e.payload for e in out] == [10, 30]
 
 
+def test_skip_retries_then_succeeds():
+    hits: list[int] = []
+
+    def flaky(e):
+        hits.append(e.payload)
+        if e.payload == 2 and hits.count(2) < 3:
+            raise ValueError("transient")
+        return e.payload * 10
+
+    out = (
+        Observable.from_iterable([env(1), env(2), env(3)])
+        .pipe(map_op(flaky, on_error="skip", retries=3))
+        .collect()
+    )
+    assert [e.payload for e in out] == [10, 20, 30]
+    assert hits.count(2) == 3
+
+
+def test_skip_retries_then_dlq():
+    from rxflow import MemorySink, Runtime
+
+    hits = {"n": 0}
+
+    def boom(e):
+        hits["n"] += 1
+        raise ValueError("still broken")
+
+    dlq = MemorySink()
+    out = (
+        Observable.from_iterable([env(1), env(2)])
+        .pipe(map_op(boom, on_error="skip", retries=3))
+        .collect(runtime=Runtime(dlq=dlq))
+    )
+    assert out == []
+    assert hits["n"] == 8
+    assert len(dlq.items) == 2
+
+
+def test_from_iterable_rejects_generators():
+    with pytest.raises(TypeError, match="from_source"):
+        Observable.from_iterable(x for x in [1, 2, 3])
+
+
+def test_from_iterable_accepts_range():
+    out = Observable.from_iterable(range(3)).collect()
+    assert [e.payload for e in out] == [0, 1, 2]
+
+
 def test_ingest_time_is_timezone_aware():
     e = Envelope(payload=1)
     assert e.ingest_time.tzinfo == timezone.utc

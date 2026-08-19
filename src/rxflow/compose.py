@@ -35,12 +35,12 @@ def apply_policy(
     on_error: ErrorPolicy = "fail_job",
     retries: int = 0,
 ) -> Any:
-    """Run ``fn(item)`` under a named policy. Returns SKIP when the item is dropped."""
-    attempts = retries + 1 if on_error in ("retry", "fail_job") and retries else 1
-    if on_error == "retry":
-        attempts = retries + 1
+    """Run ``fn(item)``. ``retries`` extra attempts apply to every policy.
+
+    After the budget is spent: ``fail_job`` raises; ``skip`` / ``retry`` DLQ and drop.
+    """
     last: BaseException | None = None
-    for _ in range(max(1, attempts)):
+    for _ in range(max(1, retries + 1)):
         try:
             return fn(item)
         except StreamProcessingError:

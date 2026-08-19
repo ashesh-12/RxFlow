@@ -88,27 +88,29 @@ def timeout(interval):
 
 
 def sample(interval):
-    """Periodic latest value per key, aligned to event time."""
+    """Periodic latest value per key, aligned to event time. Flush leftover on end."""
     gap = parse_duration(interval)
 
     @operator
     def sample(stream):
         latest: dict = {}
         next_tick: dict = {}
+        last_out: dict = {}
         rt = get_runtime()
         for item in stream:
             env = as_envelope(item)
             t = _now(env, rt)
             k = env.key
+            latest[k] = env
             if k not in next_tick:
                 next_tick[k] = t + gap
-                latest[k] = env
                 continue
-            latest[k] = env
             if t >= next_tick[k]:
-                yield latest[k]
+                yield env
+                last_out[k] = env
                 next_tick[k] = t + gap
-        for env in latest.values():
-            yield env
+        for k, env in latest.items():
+            if last_out.get(k) is not env:
+                yield env
 
     return sample()
