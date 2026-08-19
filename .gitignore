@@ -12,3 +12,4 @@ venv/
 ckpt.pkl
 .coverage
 htmlcov/
+docs/
